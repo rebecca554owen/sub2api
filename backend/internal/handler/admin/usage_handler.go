@@ -170,6 +170,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 		PageSize:  pageSize,
 		SortBy:    c.DefaultQuery("sort_by", "created_at"),
 		SortOrder: c.DefaultQuery("sort_order", "desc"),
+		Cursor:    strings.TrimSpace(c.Query("cursor")),
 	}
 	filters := usagestats.UsageLogFilters{
 		UserID:      userID,
@@ -196,7 +197,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 	for i := range records {
 		out = append(out, *dto.UsageLogFromServiceAdmin(&records[i]))
 	}
-	response.Paginated(c, out, result.Total, page, pageSize)
+	response.PaginatedWithCursor(c, out, result.Total, page, pageSize, result.NextCursor)
 }
 
 // Stats handles getting usage statistics with filters

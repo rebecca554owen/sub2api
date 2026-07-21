@@ -251,6 +251,12 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		APIKeyID:            apiKey.ID,
 		AccountID:           account.ID,
 		RequestID:           requestID,
+		EventID:             stableUsageLogEventID(requestID, apiKey.ID),
+		UserEmail:           user.Email,
+		Username:            user.Username,
+		APIKeyName:          apiKey.Name,
+		AccountName:         account.Name,
+		AccountPlatform:     account.Platform,
 		Model:               result.Model,
 		RequestedModel:      requestedModel,
 		UpstreamModel:       optionalNonEqualStringPtr(result.UpstreamModel, result.Model),
@@ -270,6 +276,10 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		ImageOutputSize:     optionalTrimmedStringPtr(result.ImageOutputSize),
 		ImageSizeSource:     optionalTrimmedStringPtr(result.ImageSizeSource),
 		ImageSizeBreakdown:  result.ImageSizeBreakdown,
+	}
+	if apiKey.Group != nil {
+		usageLog.GroupName = apiKey.Group.Name
+		usageLog.GroupPlatform = apiKey.Group.Platform
 	}
 	isVideoUsage := isGrokVideoUsageResult(result, billingModels)
 	if isVideoUsage {
@@ -362,26 +372,38 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		quotaPlatform = PlatformFromAPIKey(apiKey)
 	}
 
+	billingParams := &postUsageBillingParams{
+		Cost:                  cost,
+		User:                  user,
+		APIKey:                apiKey,
+		Account:               account,
+		Subscription:          subscription,
+		RequestPayloadHash:    resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
+		IsSubscriptionBill:    isSubscriptionBilling,
+		AccountRateMultiplier: accountRateMultiplier,
+		APIKeyService:         input.APIKeyService,
+		Platform:              quotaPlatform,
+	}
+	billingCommand := buildUsageBillingCommand(requestID, usageLog, billingParams)
+	billingFingerprint := ""
+	if billingCommand != nil {
+		billingFingerprint = billingCommand.RequestFingerprint
+	}
+	usageLogPrepared, err := prepareUsageLogBeforeBilling(ctx, s.usageLogRepo, usageLog, billingFingerprint)
+	if err != nil {
+		return err
+	}
 	billingErr := func() error {
-		_, err := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
-			Cost:                  cost,
-			User:                  user,
-			APIKey:                apiKey,
-			Account:               account,
-			Subscription:          subscription,
-			RequestPayloadHash:    resolveUsageBillingPayloadFingerprint(ctx, input.RequestPayloadHash),
-			IsSubscriptionBill:    isSubscriptionBilling,
-			AccountRateMultiplier: accountRateMultiplier,
-			APIKeyService:         input.APIKeyService,
-			Platform:              quotaPlatform,
-		}, s.billingDeps(), s.usageBillingRepo)
+		_, err := applyUsageBilling(ctx, requestID, usageLog, billingParams, s.billingDeps(), s.usageBillingRepo)
 		return err
 	}()
 
 	if billingErr != nil {
 		return billingErr
 	}
-	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+	if !usageLogPrepared {
+		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+	}
 
 	return nil
 }

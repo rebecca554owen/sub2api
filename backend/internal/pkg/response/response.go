@@ -22,11 +22,22 @@ type Response struct {
 
 // PaginatedData 分页数据格式（匹配前端期望）
 type PaginatedData struct {
-	Items    any   `json:"items"`
-	Total    int64 `json:"total"`
-	Page     int   `json:"page"`
-	PageSize int   `json:"page_size"`
-	Pages    int   `json:"pages"`
+	Items      any    `json:"items"`
+	Total      int64  `json:"total"`
+	Page       int    `json:"page"`
+	PageSize   int    `json:"page_size"`
+	Pages      int    `json:"pages"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+func PaginatedWithCursor(c *gin.Context, items any, total int64, page, pageSize int, nextCursor string) {
+	pages := int(math.Ceil(float64(total) / float64(pageSize)))
+	if pages < 1 {
+		pages = 1
+	}
+	Success(c, PaginatedData{
+		Items: items, Total: total, Page: page, PageSize: pageSize, Pages: pages, NextCursor: nextCursor,
+	})
 }
 
 // Success 返回成功响应

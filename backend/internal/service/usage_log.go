@@ -102,7 +102,17 @@ type UsageLog struct {
 	APIKeyID  int64
 	AccountID int64
 	RequestID string
+	EventID   string
 	Model     string
+	// Snapshot fields keep historical usage readable after related business
+	// entities are renamed or deleted and avoid cross-database joins.
+	UserEmail       string
+	Username        string
+	APIKeyName      string
+	AccountName     string
+	AccountPlatform string
+	GroupName       string
+	GroupPlatform   string
 	// RequestedModel is the client-requested model name recorded for stable user/admin display.
 	// Empty should be treated as Model for backward compatibility with historical rows.
 	RequestedModel string

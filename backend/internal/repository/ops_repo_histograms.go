@@ -18,6 +18,9 @@ func (r *opsRepository) GetLatencyHistogram(ctx context.Context, filter *service
 	if filter.StartTime.IsZero() || filter.EndTime.IsZero() {
 		return nil, fmt.Errorf("start_time/end_time required")
 	}
+	if r.usageStore != nil {
+		return r.getClickHouseLatencyHistogram(ctx, filter)
+	}
 
 	start := filter.StartTime.UTC()
 	end := filter.EndTime.UTC()

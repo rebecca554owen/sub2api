@@ -8,13 +8,15 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
+	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
 )
 
 type OpsHandler struct {
-	opsService *service.OpsService
+	opsService      *service.OpsService
+	usageLogRuntime *repository.UsageLogRuntime
 }
 
 // GetErrorLogByID returns ops error log detail.
@@ -70,6 +72,20 @@ func parseOpsViewParam(c *gin.Context) string {
 
 func NewOpsHandler(opsService *service.OpsService) *OpsHandler {
 	return &OpsHandler{opsService: opsService}
+}
+
+func ProvideOpsHandler(opsService *service.OpsService, usageLogRuntime *repository.UsageLogRuntime) *OpsHandler {
+	return &OpsHandler{opsService: opsService, usageLogRuntime: usageLogRuntime}
+}
+
+// GetUsageLogHealth exposes ClickHouse availability, Redis backlog, WAL size
+// and writer counters for the optional external usage-log pipeline.
+func (h *OpsHandler) GetUsageLogHealth(c *gin.Context) {
+	if h == nil || h.usageLogRuntime == nil {
+		response.Success(c, repository.UsageLogHealth{Enabled: false})
+		return
+	}
+	response.Success(c, h.usageLogRuntime.Health(c.Request.Context()))
 }
 
 // GetErrorLogs lists ops error logs.

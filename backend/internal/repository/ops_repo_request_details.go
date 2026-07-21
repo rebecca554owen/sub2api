@@ -14,6 +14,9 @@ func (r *opsRepository) ListRequestDetails(ctx context.Context, filter *service.
 	if r == nil || r.db == nil {
 		return nil, 0, fmt.Errorf("nil ops repository")
 	}
+	if r.usageStore != nil {
+		return r.listClickHouseRequestDetails(ctx, filter)
+	}
 
 	page, pageSize, startTime, endTime := filter.Normalize()
 	offset := (page - 1) * pageSize

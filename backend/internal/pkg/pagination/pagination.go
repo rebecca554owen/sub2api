@@ -14,14 +14,16 @@ type PaginationParams struct {
 	PageSize  int
 	SortBy    string
 	SortOrder string
+	Cursor    string
 }
 
 // PaginationResult 分页结果
 type PaginationResult struct {
-	Total    int64
-	Page     int
-	PageSize int
-	Pages    int
+	Total      int64
+	Page       int
+	PageSize   int
+	Pages      int
+	NextCursor string
 }
 
 // DefaultPagination 默认分页参数

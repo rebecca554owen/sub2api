@@ -55,7 +55,41 @@ func (r *batchImageRepository) GetBatchImageJobByBatchID(ctx context.Context, ba
 	if err != nil {
 		return nil, translatePersistenceError(err, service.ErrBatchImageJobNotFound, nil)
 	}
+	if err := r.hydrateBatchImageJobUsageSnapshots(ctx, job); err != nil {
+		return nil, err
+	}
 	return job, nil
+}
+
+func (r *batchImageRepository) hydrateBatchImageJobUsageSnapshots(ctx context.Context, job *service.BatchImageJob) error {
+	if r == nil || r.sql == nil || job == nil || job.APIKeyID == nil || job.AccountID == nil {
+		return nil
+	}
+	var groupID sql.NullInt64
+	var groupName, groupPlatform sql.NullString
+	err := r.sql.QueryRowContext(ctx, `
+SELECT u.email, u.username, k.name, a.name, a.platform,
+       k.group_id, g.name, g.platform
+FROM users u
+JOIN api_keys k ON k.id = $1
+JOIN accounts a ON a.id = $2
+LEFT JOIN groups g ON g.id = k.group_id
+WHERE u.id = $3`, *job.APIKeyID, *job.AccountID, job.UserID).Scan(
+		&job.UserEmail, &job.Username, &job.APIKeyName,
+		&job.AccountName, &job.AccountPlatform,
+		&groupID, &groupName, &groupPlatform,
+	)
+	if err != nil {
+		return err
+	}
+	job.GroupID = batchImageNullInt64Ptr(groupID)
+	if groupName.Valid {
+		job.GroupName = groupName.String
+	}
+	if groupPlatform.Valid {
+		job.GroupPlatform = groupPlatform.String
+	}
+	return nil
 }
 
 func (r *batchImageRepository) GetBatchImageJobByIdempotencyKey(ctx context.Context, userID, apiKeyID int64, key string) (*service.BatchImageJob, error) {

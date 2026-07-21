@@ -20,6 +20,7 @@ import (
 	dbuser "github.com/Wei-Shaw/sub2api/ent/user"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/usersubscription"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
@@ -28,14 +29,23 @@ import (
 )
 
 type userRepository struct {
-	client *dbent.Client
-	sql    sqlExecutor
+	client     *dbent.Client
+	sql        sqlExecutor
+	usageStore *clickHouseUsageLogStore
 }
 
 var _ service.RedeemUserAdjustmentRepository = (*userRepository)(nil)
 
 func NewUserRepository(client *dbent.Client, sqlDB *sql.DB) service.UserRepository {
 	return newUserRepositoryWithSQL(client, sqlDB)
+}
+
+func ProvideUserRepository(client *dbent.Client, sqlDB *sql.DB, bundle *UsageLogRepositoryBundle, cfg *config.Config) service.UserRepository {
+	repo := newUserRepositoryWithSQL(client, sqlDB)
+	if cfg != nil && cfg.UsageLogStorage.Enabled() && bundle != nil && bundle.Runtime != nil && bundle.Runtime.external != nil {
+		repo.usageStore = bundle.Runtime.external.store
+	}
+	return repo
 }
 
 func newUserRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *userRepository {
@@ -495,14 +505,68 @@ func (r *userRepository) ListWithFilters(ctx context.Context, params pagination.
 		return nil, nil, err
 	}
 
-	usersQuery := q.
-		Offset(params.Offset()).
-		Limit(params.Limit())
-	for _, order := range userListOrder(params) {
-		usersQuery = usersQuery.Order(order)
+	var users []*dbent.User
+	if r.usageStore != nil && strings.EqualFold(strings.TrimSpace(params.SortBy), "last_used_at") {
+		allIDs, idErr := q.Clone().IDs(userCtx)
+		if idErr != nil {
+			return nil, nil, idErr
+		}
+		latest, latestErr := r.GetLatestUsedAtByUserIDs(ctx, allIDs)
+		if latestErr != nil {
+			return nil, nil, latestErr
+		}
+		ascending := params.NormalizedSortOrder(pagination.SortOrderDesc) == pagination.SortOrderAsc
+		sort.Slice(allIDs, func(i, j int) bool {
+			left, right := latest[allIDs[i]], latest[allIDs[j]]
+			if left == nil || right == nil {
+				if left == nil && right == nil {
+					if ascending {
+						return allIDs[i] < allIDs[j]
+					}
+					return allIDs[i] > allIDs[j]
+				}
+				// Match PostgreSQL ASC NULLS FIRST / DESC NULLS LAST.
+				return left == nil && ascending || right == nil && !ascending
+			}
+			if left.Equal(*right) {
+				if ascending {
+					return allIDs[i] < allIDs[j]
+				}
+				return allIDs[i] > allIDs[j]
+			}
+			if ascending {
+				return left.Before(*right)
+			}
+			return left.After(*right)
+		})
+		start := params.Offset()
+		if start < len(allIDs) {
+			end := min(start+params.Limit(), len(allIDs))
+			pageIDs := allIDs[start:end]
+			pageUsers, pageErr := r.client.User.Query().Where(dbuser.IDIn(pageIDs...)).All(userCtx)
+			if pageErr != nil {
+				return nil, nil, pageErr
+			}
+			byID := make(map[int64]*dbent.User, len(pageUsers))
+			for _, entity := range pageUsers {
+				byID[entity.ID] = entity
+			}
+			users = make([]*dbent.User, 0, len(pageIDs))
+			for _, id := range pageIDs {
+				if entity := byID[id]; entity != nil {
+					users = append(users, entity)
+				}
+			}
+		}
+	} else {
+		usersQuery := q.
+			Offset(params.Offset()).
+			Limit(params.Limit())
+		for _, order := range userListOrder(params) {
+			usersQuery = usersQuery.Order(order)
+		}
+		users, err = usersQuery.All(userCtx)
 	}
-
-	users, err := usersQuery.All(userCtx)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -627,6 +691,27 @@ func (r *userRepository) GetLatestUsedAtByUserIDs(ctx context.Context, userIDs [
 	}
 	if r.sql == nil {
 		return nil, fmt.Errorf("sql executor is not configured")
+	}
+	if r.usageStore != nil {
+		placeholders, args := clickHouseInArgs(userIDs)
+		rows, err := r.usageStore.db.QueryContext(ctx,
+			fmt.Sprintf("SELECT user_id, max(created_at) FROM usage_logs FINAL WHERE user_id IN (%s) GROUP BY user_id", placeholders),
+			args...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var userID int64
+			var lastUsedAt time.Time
+			if err := rows.Scan(&userID, &lastUsedAt); err != nil {
+				return nil, err
+			}
+			timestamp := lastUsedAt.UTC()
+			result[userID] = &timestamp
+		}
+		return result, rows.Err()
 	}
 
 	const query = `
