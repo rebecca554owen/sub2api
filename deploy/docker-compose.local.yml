@@ -72,7 +72,7 @@ services:
       # =======================================================================
       # Redis Configuration
       # =======================================================================
-      - REDIS_HOST=redis
+      - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=6379
       - REDIS_USERNAME=${REDIS_USERNAME:-}
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}
@@ -248,19 +248,13 @@ services:
     volumes:
       # Local directory mapping for easy migration
       - ./redis_data:/data:Z
-    # The command is one quoted script for the inner `sh -c`. Compose keeps
-    # the newlines inside the quoted string, so every line needs a trailing
-    # `\` — without it, `redis-server` on the first line runs with no flags
-    # at all, and the --save/--appendonly/--appendfsync lines are never read.
-    command: >
-        sh -c '
-          redis-server \
-          --save 60 1 \
-          --appendonly yes \
-          --appendfsync everysec \
-          ${REDIS_PASSWORD:+--requirepass "$REDIS_PASSWORD"}'
+    command:
+      - sh
+      - -c
+      - 'exec redis-server --save 60 1 --appendonly yes --appendfsync everysec $${REDIS_PASSWORD:+--requirepass "$$REDIS_PASSWORD"}'
     environment:
       - TZ=${TZ:-Asia/Shanghai}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       # REDISCLI_AUTH is used by redis-cli for authentication (safer than -a flag)
       - REDISCLI_AUTH=${REDIS_PASSWORD:-}
     networks:
