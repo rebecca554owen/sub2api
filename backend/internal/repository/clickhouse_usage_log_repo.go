@@ -357,13 +357,13 @@ func scanClickHouseUsageLog(scanner interface{ Scan(...any) error }) (*service.U
 	var event usageLogEvent
 	var (
 		groupID, subscriptionID, channelID                              sql.NullInt64
-		upstreamModel, modelMappingChain, billingTier, billingMode      sql.NullString
-		serviceTier, reasoningEffort, inboundEndpoint, upstreamEndpoint sql.NullString
+		upstreamModel, modelMappingChain, billingTier, billingMode      clickHouseNullString
+		serviceTier, reasoningEffort, inboundEndpoint, upstreamEndpoint clickHouseNullString
 		videoDuration, duration, firstToken                             sql.NullInt64
 		accountRate, accountStats                                       sql.NullFloat64
-		userAgent, ipAddress                                            sql.NullString
-		imageSize, imageInputSize, imageOutputSize, imageSizeSource     sql.NullString
-		mediaType, videoResolution                                      sql.NullString
+		userAgent, ipAddress                                            clickHouseNullString
+		imageSize, imageInputSize, imageOutputSize, imageSizeSource     clickHouseNullString
+		mediaType, videoResolution                                      clickHouseNullString
 		breakdown                                                       string
 		requestType                                                     int16
 	)
@@ -451,7 +451,28 @@ func scanNullIntPtr(value sql.NullInt64) *int {
 	return &copy
 }
 
-func scanNullStringPtr(value sql.NullString) *string {
+// clickHouseNullString accepts the *string values returned by clickhouse-go
+// for LowCardinality(Nullable(String)) columns, in addition to normal SQL
+// nullable string representations.
+type clickHouseNullString struct {
+	sql.NullString
+}
+
+func (value *clickHouseNullString) Scan(source any) error {
+	if pointer, ok := source.(*string); ok {
+		if pointer == nil {
+			value.String = ""
+			value.Valid = false
+			return nil
+		}
+		value.String = *pointer
+		value.Valid = true
+		return nil
+	}
+	return value.NullString.Scan(source)
+}
+
+func scanNullStringPtr(value clickHouseNullString) *string {
 	if !value.Valid {
 		return nil
 	}

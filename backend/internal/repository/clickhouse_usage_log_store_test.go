@@ -34,6 +34,19 @@ func TestUsageLogCursorRoundTrip(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestClickHouseNullStringAcceptsDriverPointer(t *testing.T) {
+	t.Parallel()
+
+	value := "token"
+	var scanned clickHouseNullString
+	require.NoError(t, scanned.Scan(&value))
+	require.True(t, scanned.Valid)
+	require.Equal(t, "token", scanned.String)
+
+	require.NoError(t, scanned.Scan((*string)(nil)))
+	require.False(t, scanned.Valid)
+}
+
 func TestClickHouseCursorCountUsesOriginalFilter(t *testing.T) {
 	t.Parallel()
 	db, mock, err := sqlmock.New()
