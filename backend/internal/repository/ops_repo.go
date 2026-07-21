@@ -8,12 +8,14 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 )
 
 type opsRepository struct {
-	db *sql.DB
+	db         *sql.DB
+	usageStore *clickHouseUsageLogStore
 }
 
 const insertOpsErrorLogSQL = `
@@ -62,6 +64,14 @@ INSERT INTO ops_error_logs (
 
 func NewOpsRepository(db *sql.DB) service.OpsRepository {
 	return &opsRepository{db: db}
+}
+
+func ProvideOpsRepository(db *sql.DB, bundle *UsageLogRepositoryBundle, cfg *config.Config) service.OpsRepository {
+	repo := &opsRepository{db: db}
+	if cfg != nil && cfg.UsageLogStorage.Enabled() && bundle != nil && bundle.Runtime != nil && bundle.Runtime.external != nil {
+		repo.usageStore = bundle.Runtime.external.store
+	}
+	return repo
 }
 
 func (r *opsRepository) InsertErrorLog(ctx context.Context, input *service.OpsInsertErrorLogInput) (int64, error) {

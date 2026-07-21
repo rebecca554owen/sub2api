@@ -31,6 +31,9 @@ func (r *opsRepository) GetThroughputTrend(ctx context.Context, filter *service.
 
 	start := filter.StartTime.UTC()
 	end := filter.EndTime.UTC()
+	if r.usageStore != nil {
+		return r.getClickHouseThroughputTrend(ctx, filter, bucketSeconds)
+	}
 
 	usageJoin, usageWhere, usageArgs, next := buildUsageWhere(filter, start, end, 1)
 	errorWhere, errorArgs, _ := buildErrorWhere(filter, start, end, next)

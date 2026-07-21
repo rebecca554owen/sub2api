@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/timezone"
+	"github.com/google/uuid"
 )
 
 func (s *GatewayService) getUserGroupRateMultiplier(ctx context.Context, userID, groupID int64, groupDefaultMultiplier float64) float64 {
@@ -66,6 +68,13 @@ type apiKeyAuthCacheInvalidator interface {
 
 type usageLogBestEffortWriter interface {
 	CreateBestEffort(ctx context.Context, log *UsageLog) error
+}
+
+// usageLogPreBillingWriter is implemented by durable external log stores. The
+// event is persisted before billing starts, while the consumer waits for the
+// matching usage_billing_dedup row before making it visible in ClickHouse.
+type usageLogPreBillingWriter interface {
+	PrepareBillingUsageLog(ctx context.Context, log *UsageLog, billingFingerprint string) error
 }
 
 // postUsageBillingParams 统一扣费所需的参数
@@ -553,6 +562,19 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 	}
 }
 
+func prepareUsageLogBeforeBilling(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, billingFingerprint string) (bool, error) {
+	writer, ok := repo.(usageLogPreBillingWriter)
+	if !ok || usageLog == nil {
+		return false, nil
+	}
+	usageCtx, cancel := detachedBillingContext(ctx)
+	defer cancel()
+	if err := writer.PrepareBillingUsageLog(usageCtx, usageLog, billingFingerprint); err != nil {
+		return false, fmt.Errorf("persist usage log before billing: %w", err)
+	}
+	return true, nil
+}
+
 // recordUsageOpts 内部选项，参数化普通计费与长上下文计费的差异点。
 type recordUsageOpts struct {
 	// 长上下文计费（仅 Gemini 路径需要）
@@ -758,7 +780,7 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		}
 	}
 	requestID := usageLog.RequestID
-	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{
+	billingParams := &postUsageBillingParams{
 		Cost:                  cost,
 		User:                  user,
 		APIKey:                apiKey,
@@ -769,12 +791,24 @@ func (s *GatewayService) recordUsageCore(ctx context.Context, input *recordUsage
 		AccountRateMultiplier: accountRateMultiplier,
 		APIKeyService:         input.APIKeyService,
 		Platform:              quotaPlatform,
-	}, s.billingDeps(), s.usageBillingRepo)
+	}
+	billingCommand := buildUsageBillingCommand(requestID, usageLog, billingParams)
+	billingFingerprint := ""
+	if billingCommand != nil {
+		billingFingerprint = billingCommand.RequestFingerprint
+	}
+	usageLogPrepared, err := prepareUsageLogBeforeBilling(ctx, s.usageLogRepo, usageLog, billingFingerprint)
+	if err != nil {
+		return err
+	}
+	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, billingParams, s.billingDeps(), s.usageBillingRepo)
 
 	if billingErr != nil {
 		return billingErr
 	}
-	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+	if !usageLogPrepared {
+		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.gateway")
+	}
 
 	return nil
 }
@@ -979,6 +1013,12 @@ func (s *GatewayService) buildRecordUsageLog(
 		APIKeyID:              apiKey.ID,
 		AccountID:             account.ID,
 		RequestID:             requestID,
+		EventID:               stableUsageLogEventID(requestID, apiKey.ID),
+		UserEmail:             user.Email,
+		Username:              user.Username,
+		APIKeyName:            apiKey.Name,
+		AccountName:           account.Name,
+		AccountPlatform:       account.Platform,
 		Model:                 result.Model,
 		RequestedModel:        requestedModel,
 		UpstreamModel:         optionalNonEqualStringPtr(result.UpstreamModel, result.Model),
@@ -1014,6 +1054,10 @@ func (s *GatewayService) buildRecordUsageLog(
 		SubscriptionID:        optionalSubscriptionID(subscription),
 		CreatedAt:             time.Now(),
 	}
+	if apiKey.Group != nil {
+		usageLog.GroupName = apiKey.Group.Name
+		usageLog.GroupPlatform = apiKey.Group.Platform
+	}
 	if result.ImageCount > 0 && (cost == nil || cost.BillingMode != string(BillingModeToken)) {
 		usageLog.RateMultiplier = imageMultiplier
 	}
@@ -1029,6 +1073,17 @@ func (s *GatewayService) buildRecordUsageLog(
 	}
 
 	return usageLog
+}
+
+func stableUsageLogEventID(requestID string, apiKeyID int64) string {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		// Leave the ID empty so the durable event encoder can generate a unique
+		// fallback from the log timestamp. Hashing only apiKeyID would collapse
+		// every request without an ID into the same ClickHouse row.
+		return ""
+	}
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s:%d", requestID, apiKeyID))).String()
 }
 
 // resolveBillingMode 根据计费结果和请求类型确定计费模式。

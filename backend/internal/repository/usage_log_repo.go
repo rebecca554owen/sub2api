@@ -1,15 +1,20 @@
 package repository
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	gocache "github.com/patrickmn/go-cache"
+	"github.com/redis/go-redis/v9"
 )
 
 const rawUsageLogModelColumn = "model"
@@ -152,6 +157,181 @@ type usageLogRepository struct {
 
 func NewUsageLogRepository(client *dbent.Client, sqlDB *sql.DB) service.UsageLogRepository {
 	return newUsageLogRepositoryWithSQL(client, sqlDB)
+}
+
+type UsageLogRepositoryBundle struct {
+	Repository service.UsageLogRepository
+	Runtime    *UsageLogRuntime
+}
+
+type UsageLogRuntime struct {
+	external *clickHouseUsageLogRepository
+}
+
+type UsageLogHealth struct {
+	Enabled                     bool               `json:"enabled"`
+	ClickHouseOK                bool               `json:"clickhouse_ok"`
+	ClickHouseError             string             `json:"clickhouse_error,omitempty"`
+	ClickHouseWriteDelaySeconds float64            `json:"clickhouse_write_delay_seconds"`
+	RedisStreamLength           int64              `json:"redis_stream_length"`
+	RedisPending                int64              `json:"redis_pending"`
+	RedisError                  string             `json:"redis_error,omitempty"`
+	Queue                       UsageLogQueueStats `json:"queue"`
+}
+
+func (r *UsageLogRuntime) Start(ctx context.Context) error {
+	if r == nil || r.external == nil {
+		return nil
+	}
+	return r.external.Start(ctx)
+}
+
+func (r *UsageLogRuntime) Stop() {
+	if r == nil || r.external == nil {
+		return
+	}
+	r.external.Stop()
+}
+
+func (r *UsageLogRuntime) Stats() UsageLogQueueStats {
+	if r == nil || r.external == nil {
+		return UsageLogQueueStats{}
+	}
+	return r.external.QueueStats()
+}
+
+func (r *UsageLogRuntime) Health(ctx context.Context) UsageLogHealth {
+	health := UsageLogHealth{Enabled: r != nil && r.external != nil}
+	if !health.Enabled {
+		return health
+	}
+	health.Queue = r.external.QueueStats()
+	if err := r.external.store.Ping(ctx); err != nil {
+		health.ClickHouseError = err.Error()
+	} else {
+		health.ClickHouseOK = true
+		if delay, err := r.external.store.LastWriteDelay(ctx); err == nil {
+			health.ClickHouseWriteDelaySeconds = delay.Seconds()
+		}
+	}
+	if r.external.queue != nil && r.external.queue.rdb != nil {
+		length, err := r.external.queue.rdb.XLen(ctx, r.external.queue.stream).Result()
+		if err != nil {
+			health.RedisError = err.Error()
+		} else {
+			health.RedisStreamLength = length
+			if r.external.consumer != nil {
+				pending, pendingErr := r.external.queue.rdb.XPending(ctx, r.external.queue.stream, r.external.consumer.cfg.Group).Result()
+				if pendingErr != nil && !errors.Is(pendingErr, redis.Nil) {
+					health.RedisError = pendingErr.Error()
+				} else if pending != nil {
+					health.RedisPending = pending.Count
+				}
+			}
+		}
+	}
+	return health
+}
+
+func ProvideUsageLogRepositoryBundle(
+	client *dbent.Client,
+	sqlDB *sql.DB,
+	rdb *redis.Client,
+	cfg *config.Config,
+) (*UsageLogRepositoryBundle, error) {
+	postgresRepository := NewUsageLogRepository(client, sqlDB)
+	if cfg == nil || !cfg.UsageLogStorage.Enabled() {
+		return &UsageLogRepositoryBundle{
+			Repository: postgresRepository,
+			Runtime:    &UsageLogRuntime{},
+		}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	store, err := openClickHouseUsageLogStore(ctx, cfg.UsageLogStorage.DSN, cfg.UsageLogStorage.ClickHouseTTLDays)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.UsageLogStorage.AutoMigrateOldLogs {
+		sourceDB := sqlDB
+		closeSource := false
+		if oldDSN := strings.TrimSpace(cfg.UsageLogStorage.OldLogDSN); oldDSN != "" {
+			sourceDB, err = sql.Open("postgres", oldDSN)
+			if err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("open old usage log PostgreSQL database: %w", err)
+			}
+			closeSource = true
+		}
+		if closeSource {
+			defer func() { _ = sourceDB.Close() }()
+		}
+		report, migrationErr := MigrateAndClearUsageLogsToClickHouse(context.Background(), sourceDB, UsageLogMigrationOptions{
+			ClickHouseDSN:       cfg.UsageLogStorage.DSN,
+			TTLDays:             cfg.UsageLogStorage.ClickHouseTTLDays,
+			BatchSize:           cfg.UsageLogStorage.MigrationBatchSize,
+			AllowNonEmptyTarget: cfg.UsageLogStorage.AllowNonEmptyTarget,
+		})
+		if migrationErr != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("auto migrate old usage logs: %w", migrationErr)
+		}
+		logger.LegacyPrintf(
+			"repository.usage_log_migration",
+			"usage log migration completed: source_rows=%d expired_rows=%d migrated_rows=%d destination_rows=%d max_source_id=%d",
+			report.SourceRows,
+			report.ExpiredRows,
+			report.MigratedRows,
+			report.DestinationRows,
+			report.MaxSourceID,
+		)
+	}
+	wal, err := openUsageLogWAL(cfg.UsageLogStorage.WALDir, cfg.UsageLogStorage.WALMaxBytes)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	metrics := &usageLogQueueMetrics{}
+	queue, err := newUsageLogDurableQueue(rdb, wal, cfg.UsageLogStorage.Stream, metrics)
+	if err != nil {
+		_ = wal.Close()
+		_ = store.Close()
+		return nil, err
+	}
+	consumer, err := newUsageLogConsumer(rdb, sqlDB, store, queue, usageLogConsumerConfig{
+		Stream: cfg.UsageLogStorage.Stream, Group: cfg.UsageLogStorage.ConsumerGroup,
+		Consumer: cfg.UsageLogStorage.ConsumerName, BatchSize: cfg.UsageLogStorage.BatchSize,
+		FlushInterval:  time.Duration(cfg.UsageLogStorage.FlushIntervalMS) * time.Millisecond,
+		ReadBlock:      time.Duration(cfg.UsageLogStorage.ReadBlockMilliseconds) * time.Millisecond,
+		ClaimIdle:      time.Duration(cfg.UsageLogStorage.ClaimIdleSeconds) * time.Second,
+		ReplayInterval: 5 * time.Second,
+	})
+	if err != nil {
+		_ = wal.Close()
+		_ = store.Close()
+		return nil, err
+	}
+	external := &clickHouseUsageLogRepository{
+		store: store, queue: queue, consumer: consumer, billingDB: sqlDB,
+	}
+	return &UsageLogRepositoryBundle{
+		Repository: external,
+		Runtime:    &UsageLogRuntime{external: external},
+	}, nil
+}
+
+func ProvideUsageLogRepositoryFromBundle(bundle *UsageLogRepositoryBundle) service.UsageLogRepository {
+	if bundle == nil {
+		return nil
+	}
+	return bundle.Repository
+}
+
+func ProvideUsageLogRuntimeFromBundle(bundle *UsageLogRepositoryBundle) *UsageLogRuntime {
+	if bundle == nil || bundle.Runtime == nil {
+		return &UsageLogRuntime{}
+	}
+	return bundle.Runtime
 }
 
 func newUsageLogRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *usageLogRepository {

@@ -27,6 +27,7 @@ import (
 type Application struct {
 	Server      *http.Server
 	PromptAudit *securityaudit.PromptService
+	UsageLogs   *repository.UsageLogRuntime
 	Cleanup     func()
 }
 
@@ -56,7 +57,7 @@ func initializeApplication(buildInfo handler.BuildInfo) (*Application, error) {
 		provideCleanup,
 
 		// Application struct
-		wire.Struct(new(Application), "Server", "PromptAudit", "Cleanup"),
+		wire.Struct(new(Application), "Server", "PromptAudit", "UsageLogs", "Cleanup"),
 	)
 	return nil, nil
 }
@@ -114,6 +115,7 @@ func provideCleanup(
 	ollamaCloudUsage *service.OllamaCloudUsageService,
 	auditLog *service.AuditLogService,
 	promptAudit *securityaudit.PromptService,
+	usageLogs *repository.UsageLogRuntime,
 ) func() {
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -341,6 +343,12 @@ func provideCleanup(
 		}
 
 		infraSteps := []cleanupStep{
+			{"UsageLogRuntime", func() error {
+				if usageLogs != nil {
+					usageLogs.Stop()
+				}
+				return nil
+			}},
 			{"Redis", func() error {
 				if rdb == nil {
 					return nil
