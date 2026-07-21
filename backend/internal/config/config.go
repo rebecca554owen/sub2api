@@ -1600,6 +1600,10 @@ type UsageCleanupConfig struct {
 // usage logs. When DSN is empty, the existing PostgreSQL repository is used.
 type UsageLogStorageConfig struct {
 	DSN                   string `mapstructure:"dsn"`
+	OldLogDSN             string `mapstructure:"old_log_dsn"`
+	AutoMigrateOldLogs    bool   `mapstructure:"auto_migrate_old_logs"`
+	MigrationBatchSize    int    `mapstructure:"migration_batch_size"`
+	AllowNonEmptyTarget   bool   `mapstructure:"allow_non_empty_target"`
 	ClickHouseTTLDays     int    `mapstructure:"clickhouse_ttl_days"`
 	Stream                string `mapstructure:"stream"`
 	ConsumerGroup         string `mapstructure:"consumer_group"`
@@ -1663,17 +1667,21 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
 	}
 	for key, envName := range map[string]string{
-		"usage_log_storage.dsn":                 "LOG_SQL_DSN",
-		"usage_log_storage.clickhouse_ttl_days": "LOG_SQL_CLICKHOUSE_TTL_DAYS",
-		"usage_log_storage.stream":              "LOG_QUEUE_STREAM",
-		"usage_log_storage.consumer_group":      "LOG_QUEUE_CONSUMER_GROUP",
-		"usage_log_storage.consumer_name":       "LOG_QUEUE_CONSUMER_NAME",
-		"usage_log_storage.batch_size":          "LOG_QUEUE_BATCH_SIZE",
-		"usage_log_storage.flush_interval_ms":   "LOG_QUEUE_FLUSH_INTERVAL_MS",
-		"usage_log_storage.wal_dir":             "LOG_WAL_DIR",
-		"usage_log_storage.wal_max_bytes":       "LOG_WAL_MAX_BYTES",
-		"usage_log_storage.claim_idle_seconds":  "LOG_QUEUE_CLAIM_IDLE_SECONDS",
-		"usage_log_storage.read_block_ms":       "LOG_QUEUE_READ_BLOCK_MS",
+		"usage_log_storage.dsn":                    "LOG_SQL_DSN",
+		"usage_log_storage.old_log_dsn":            "OLD_LOG_SQL_DSN",
+		"usage_log_storage.auto_migrate_old_logs":  "AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB",
+		"usage_log_storage.migration_batch_size":   "LOG_MIGRATION_BATCH_SIZE",
+		"usage_log_storage.allow_non_empty_target": "ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET",
+		"usage_log_storage.clickhouse_ttl_days":    "LOG_SQL_CLICKHOUSE_TTL_DAYS",
+		"usage_log_storage.stream":                 "LOG_QUEUE_STREAM",
+		"usage_log_storage.consumer_group":         "LOG_QUEUE_CONSUMER_GROUP",
+		"usage_log_storage.consumer_name":          "LOG_QUEUE_CONSUMER_NAME",
+		"usage_log_storage.batch_size":             "LOG_QUEUE_BATCH_SIZE",
+		"usage_log_storage.flush_interval_ms":      "LOG_QUEUE_FLUSH_INTERVAL_MS",
+		"usage_log_storage.wal_dir":                "LOG_WAL_DIR",
+		"usage_log_storage.wal_max_bytes":          "LOG_WAL_MAX_BYTES",
+		"usage_log_storage.claim_idle_seconds":     "LOG_QUEUE_CLAIM_IDLE_SECONDS",
+		"usage_log_storage.read_block_ms":          "LOG_QUEUE_READ_BLOCK_MS",
 	} {
 		if err := viper.BindEnv(key, envName); err != nil {
 			return nil, fmt.Errorf("bind %s: %w", envName, err)
@@ -2191,6 +2199,10 @@ func setDefaults() {
 	// External usage log storage. LOG_SQL_DSN is intentionally empty by
 	// default so existing PostgreSQL deployments keep their current behavior.
 	viper.SetDefault("usage_log_storage.dsn", "")
+	viper.SetDefault("usage_log_storage.old_log_dsn", "")
+	viper.SetDefault("usage_log_storage.auto_migrate_old_logs", false)
+	viper.SetDefault("usage_log_storage.migration_batch_size", 10000)
+	viper.SetDefault("usage_log_storage.allow_non_empty_target", false)
 	viper.SetDefault("usage_log_storage.clickhouse_ttl_days", 90)
 	viper.SetDefault("usage_log_storage.stream", "sub2api:usage_logs")
 	viper.SetDefault("usage_log_storage.consumer_group", "sub2api-usage-log-writers")
@@ -3029,6 +3041,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	if c.UsageLogStorage.Enabled() {
+		if c.UsageLogStorage.MigrationBatchSize <= 0 || c.UsageLogStorage.MigrationBatchSize > 10000 {
+			return fmt.Errorf("usage_log_storage.migration_batch_size must be between 1 and 10000")
+		}
 		if c.UsageLogStorage.ClickHouseTTLDays <= 0 || c.UsageLogStorage.ClickHouseTTLDays > 3650 {
 			return fmt.Errorf("usage_log_storage.clickhouse_ttl_days must be between 1 and 3650")
 		}

@@ -11,6 +11,7 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	gocache "github.com/patrickmn/go-cache"
 	"github.com/redis/go-redis/v9"
@@ -248,6 +249,40 @@ func ProvideUsageLogRepositoryBundle(
 	store, err := openClickHouseUsageLogStore(ctx, cfg.UsageLogStorage.DSN, cfg.UsageLogStorage.ClickHouseTTLDays)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.UsageLogStorage.AutoMigrateOldLogs {
+		sourceDB := sqlDB
+		closeSource := false
+		if oldDSN := strings.TrimSpace(cfg.UsageLogStorage.OldLogDSN); oldDSN != "" {
+			sourceDB, err = sql.Open("postgres", oldDSN)
+			if err != nil {
+				_ = store.Close()
+				return nil, fmt.Errorf("open old usage log PostgreSQL database: %w", err)
+			}
+			closeSource = true
+		}
+		if closeSource {
+			defer func() { _ = sourceDB.Close() }()
+		}
+		report, migrationErr := MigrateAndClearUsageLogsToClickHouse(context.Background(), sourceDB, UsageLogMigrationOptions{
+			ClickHouseDSN:       cfg.UsageLogStorage.DSN,
+			TTLDays:             cfg.UsageLogStorage.ClickHouseTTLDays,
+			BatchSize:           cfg.UsageLogStorage.MigrationBatchSize,
+			AllowNonEmptyTarget: cfg.UsageLogStorage.AllowNonEmptyTarget,
+		})
+		if migrationErr != nil {
+			_ = store.Close()
+			return nil, fmt.Errorf("auto migrate old usage logs: %w", migrationErr)
+		}
+		logger.LegacyPrintf(
+			"repository.usage_log_migration",
+			"usage log migration completed: source_rows=%d expired_rows=%d migrated_rows=%d destination_rows=%d max_source_id=%d",
+			report.SourceRows,
+			report.ExpiredRows,
+			report.MigratedRows,
+			report.DestinationRows,
+			report.MaxSourceID,
+		)
 	}
 	wal, err := openUsageLogWAL(cfg.UsageLogStorage.WALDir, cfg.UsageLogStorage.WALMaxBytes)
 	if err != nil {

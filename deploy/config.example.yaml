@@ -850,6 +850,11 @@ usage_cleanup:
 # ClickHouse；Redis 故障时使用本地 WAL 兜底，不进行 PostgreSQL/ClickHouse 双写。
 usage_log_storage:
   dsn: ""
+  # Empty uses the main PostgreSQL database as the legacy usage_logs source.
+  old_log_dsn: ""
+  auto_migrate_old_logs: false
+  migration_batch_size: 10000
+  allow_non_empty_target: false
   clickhouse_ttl_days: 90
   stream: "sub2api:usage_logs"
   consumer_group: "sub2api-usage-log-writers"

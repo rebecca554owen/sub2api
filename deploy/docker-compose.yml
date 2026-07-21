@@ -80,6 +80,10 @@ services:
       # Optional external ClickHouse storage for usage logs. Leave LOG_SQL_DSN
       # empty to keep the existing PostgreSQL behavior.
       - LOG_SQL_DSN=${LOG_SQL_DSN:-}
+      - OLD_LOG_SQL_DSN=${OLD_LOG_SQL_DSN:-}
+      - AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB=${AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB:-false}
+      - LOG_MIGRATION_BATCH_SIZE=${LOG_MIGRATION_BATCH_SIZE:-10000}
+      - ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET=${ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET:-false}
       - LOG_SQL_CLICKHOUSE_TTL_DAYS=${LOG_SQL_CLICKHOUSE_TTL_DAYS:-90}
       - LOG_QUEUE_STREAM=${LOG_QUEUE_STREAM:-sub2api:usage_logs}
       - LOG_QUEUE_CONSUMER_GROUP=${LOG_QUEUE_CONSUMER_GROUP:-sub2api-usage-log-writers}

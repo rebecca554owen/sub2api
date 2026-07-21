@@ -24,9 +24,42 @@ database: it is an `fsync`ed local append-only emergency buffer used only when
 Redis cannot accept an event. The WAL directory must be on persistent storage
 and must not be shared by multiple application containers.
 
-## Migration before enabling the DSN
+## Automatic startup migration
 
-Run the migration while Sub2API is still using PostgreSQL usage logs:
+For the normal cutover, configure the target and enable startup migration in
+the same deployment:
+
+```bash
+LOG_SQL_DSN=clickhouse://sub2api_logger:password@clickhouse:9000/sub2api_logs?compress=lz4
+AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB=true
+LOG_MIGRATION_BATCH_SIZE=10000
+ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET=false
+```
+
+When `OLD_LOG_SQL_DSN` is empty, the current main PostgreSQL database is used
+as the legacy `usage_logs` source. Set `OLD_LOG_SQL_DSN` only when the old log
+table is in another PostgreSQL database.
+
+The application creates/updates the ClickHouse schema before opening the HTTP
+listener. It then captures a PostgreSQL ID high-water mark, copies the current
+retention window, validates row counts plus daily, user and model aggregates,
+and clears the captured source rows. Rows older than the configured TTL are
+counted as expired and cleared without copying. The final cleanup takes an
+exclusive table lock and aborts if the high-water mark changed, so a concurrent
+legacy writer cannot be silently skipped.
+
+The ClickHouse target must be empty by default. Set
+`ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET=true` only after reviewing a partial
+migration; stable event IDs and `ReplacingMergeTree` make replay idempotent.
+
+After a successful cutover, set `AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB=false`. New
+usage details continue to use Redis Streams/WAL and ClickHouse, while billing
+and `usage_billing_dedup` remain in PostgreSQL.
+
+## Manual preflight migration
+
+The standalone command remains available for a non-destructive preflight. It
+copies and validates but does not clear PostgreSQL:
 
 ```bash
 cd backend
@@ -35,13 +68,6 @@ go run ./cmd/migrate-usage-logs-clickhouse \
   --clickhouse-dsn "$LOG_SQL_DSN" \
   --ttl-days 90
 ```
-
-The command is restartable and validates row counts plus daily, user and model
-aggregates for requests, tokens and costs. Each run captures a PostgreSQL ID
-high-water mark, so traffic created during a long migration does not invalidate
-that run's checks. By default it migrates the current TTL window. Run it once
-more immediately before cutover to catch the tail, then enable `LOG_SQL_DSN`
-only after validation succeeds.
 
 The ClickHouse database, user and credentials must be created separately. Give
 the user permission to create/alter the dedicated `usage_logs` table and insert,

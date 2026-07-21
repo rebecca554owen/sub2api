@@ -13,10 +13,11 @@ import (
 )
 
 type UsageLogMigrationOptions struct {
-	ClickHouseDSN string
-	TTLDays       int
-	BatchSize     int
-	Since         time.Time
+	ClickHouseDSN       string
+	TTLDays             int
+	BatchSize           int
+	Since               time.Time
+	AllowNonEmptyTarget bool
 }
 
 type UsageLogMigrationReport struct {
@@ -25,12 +26,56 @@ type UsageLogMigrationReport struct {
 	Since           time.Time `json:"since"`
 	MaxSourceID     int64     `json:"max_source_id"`
 	SourceRows      int64     `json:"source_rows"`
+	ExpiredRows     int64     `json:"expired_rows"`
 	DestinationRows int64     `json:"destination_rows"`
 	MigratedBatches int64     `json:"migrated_batches"`
 	MigratedRows    int64     `json:"migrated_rows"`
 	ValidatedDays   int       `json:"validated_days"`
 	ValidatedUsers  int       `json:"validated_users"`
 	ValidatedModels int       `json:"validated_models"`
+}
+
+// MigrateAndClearUsageLogsToClickHouse copies the bounded PostgreSQL window,
+// validates row and aggregate parity, then removes only rows covered by the
+// captured high-water mark. Rows older than the ClickHouse retention window
+// are counted as expired and cleared without copying.
+func MigrateAndClearUsageLogsToClickHouse(ctx context.Context, postgres *sql.DB, opts UsageLogMigrationOptions) (*UsageLogMigrationReport, error) {
+	report, err := MigrateUsageLogsToClickHouse(ctx, postgres, opts)
+	if err != nil {
+		return nil, err
+	}
+	if report.MaxSourceID == 0 {
+		return report, nil
+	}
+	tx, err := postgres.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin PostgreSQL usage log cleanup: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, "LOCK TABLE usage_logs IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return nil, fmt.Errorf("lock PostgreSQL usage logs for cutover: %w", err)
+	}
+	var currentMaxID int64
+	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM usage_logs").Scan(&currentMaxID); err != nil {
+		return nil, fmt.Errorf("recheck PostgreSQL usage log high-water mark: %w", err)
+	}
+	if currentMaxID != report.MaxSourceID {
+		return nil, fmt.Errorf("usage log source changed during migration: high-water mark moved from %d to %d", report.MaxSourceID, currentMaxID)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM usage_logs WHERE id <= $1", report.MaxSourceID); err != nil {
+		return nil, fmt.Errorf("clear migrated PostgreSQL usage logs: %w", err)
+	}
+	var remaining int64
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE id <= $1", report.MaxSourceID).Scan(&remaining); err != nil {
+		return nil, fmt.Errorf("verify cleared PostgreSQL usage logs: %w", err)
+	}
+	if remaining != 0 {
+		return nil, fmt.Errorf("usage log cleanup incomplete: %d rows remain", remaining)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit PostgreSQL usage log cleanup: %w", err)
+	}
+	return report, nil
 }
 
 type usageMigrationAggregate struct {
@@ -61,12 +106,27 @@ func MigrateUsageLogsToClickHouse(ctx context.Context, postgres *sql.DB, opts Us
 		return nil, err
 	}
 	defer func() { _ = store.Close() }()
-
-	if err := postgres.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM usage_logs WHERE created_at >= $1", opts.Since).Scan(&report.MaxSourceID); err != nil {
+	if err := postgres.QueryRowContext(ctx, "SELECT COALESCE(MAX(id), 0) FROM usage_logs").Scan(&report.MaxSourceID); err != nil {
 		return nil, fmt.Errorf("find PostgreSQL usage log high-water mark: %w", err)
 	}
 	if err := postgres.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE created_at >= $1 AND id <= $2", opts.Since, report.MaxSourceID).Scan(&report.SourceRows); err != nil {
 		return nil, fmt.Errorf("count PostgreSQL usage logs: %w", err)
+	}
+	if err := postgres.QueryRowContext(ctx, "SELECT COUNT(*) FROM usage_logs WHERE created_at < $1 AND id <= $2", opts.Since, report.MaxSourceID).Scan(&report.ExpiredRows); err != nil {
+		return nil, fmt.Errorf("count expired PostgreSQL usage logs: %w", err)
+	}
+	if report.SourceRows == 0 {
+		report.FinishedAt = time.Now().UTC()
+		return report, nil
+	}
+	if !opts.AllowNonEmptyTarget {
+		var targetRows int64
+		if err := store.db.QueryRowContext(ctx, "SELECT count() FROM usage_logs").Scan(&targetRows); err != nil {
+			return nil, fmt.Errorf("count existing ClickHouse usage logs: %w", err)
+		}
+		if targetRows != 0 {
+			return nil, fmt.Errorf("usage log migration aborted: ClickHouse target is not empty (%d rows)", targetRows)
+		}
 	}
 	var lastID int64
 	for {
