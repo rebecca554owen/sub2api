@@ -13,6 +13,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/group"
 	"github.com/Wei-Shaw/sub2api/ent/schema/mixins"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/lib/pq"
 
@@ -23,12 +24,21 @@ import (
 )
 
 type apiKeyRepository struct {
-	client *dbent.Client
-	sql    sqlExecutor
+	client     *dbent.Client
+	sql        sqlExecutor
+	usageStore *clickHouseUsageLogStore
 }
 
 func NewAPIKeyRepository(client *dbent.Client, sqlDB *sql.DB) service.APIKeyRepository {
 	return newAPIKeyRepositoryWithSQL(client, sqlDB)
+}
+
+func ProvideAPIKeyRepository(client *dbent.Client, sqlDB *sql.DB, bundle *UsageLogRepositoryBundle, cfg *config.Config) service.APIKeyRepository {
+	repo := newAPIKeyRepositoryWithSQL(client, sqlDB)
+	if cfg != nil && cfg.UsageLogStorage.Enabled() && bundle != nil && bundle.Runtime != nil && bundle.Runtime.external != nil {
+		repo.usageStore = bundle.Runtime.external.store
+	}
+	return repo
 }
 
 func newAPIKeyRepositoryWithSQL(client *dbent.Client, sqlq sqlExecutor) *apiKeyRepository {
@@ -483,6 +493,27 @@ func (r *apiKeyRepository) attachLastUsedIPs(ctx context.Context, keys []service
 func (r *apiKeyRepository) latestUsageLogIPs(ctx context.Context, apiKeyIDs []int64) (result map[int64]string, err error) {
 	if len(apiKeyIDs) == 0 || r.sql == nil {
 		return map[int64]string{}, nil
+	}
+	if r.usageStore != nil {
+		placeholders, args := clickHouseInArgs(apiKeyIDs)
+		query := fmt.Sprintf(`SELECT api_key_id, argMax(assumeNotNull(ip_address), tuple(created_at, id))
+FROM usage_logs FINAL WHERE api_key_id IN (%s) AND NOT isNull(ip_address) AND NOT empty(ip_address)
+GROUP BY api_key_id`, placeholders)
+		rows, queryErr := r.usageStore.db.QueryContext(ctx, query, args...)
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		defer func() { _ = rows.Close() }()
+		out := make(map[int64]string, len(apiKeyIDs))
+		for rows.Next() {
+			var apiKeyID int64
+			var ipAddress string
+			if scanErr := rows.Scan(&apiKeyID, &ipAddress); scanErr != nil {
+				return nil, scanErr
+			}
+			out[apiKeyID] = ipAddress
+		}
+		return out, rows.Err()
 	}
 
 	query, args := latestUsageLogIPsQuery(apiKeyIDs, r.client.Driver().Dialect())

@@ -67,6 +67,18 @@ services:
       - REDIS_MIN_IDLE_CONNS=${REDIS_MIN_IDLE_CONNS:-10}
       - REDIS_ENABLE_TLS=${REDIS_ENABLE_TLS:-false}
 
+      - LOG_SQL_DSN=${LOG_SQL_DSN:-}
+      - LOG_SQL_CLICKHOUSE_TTL_DAYS=${LOG_SQL_CLICKHOUSE_TTL_DAYS:-90}
+      - LOG_QUEUE_STREAM=${LOG_QUEUE_STREAM:-sub2api:usage_logs}
+      - LOG_QUEUE_CONSUMER_GROUP=${LOG_QUEUE_CONSUMER_GROUP:-sub2api-usage-log-writers}
+      - LOG_QUEUE_CONSUMER_NAME=${LOG_QUEUE_CONSUMER_NAME:-}
+      - LOG_QUEUE_BATCH_SIZE=${LOG_QUEUE_BATCH_SIZE:-1000}
+      - LOG_QUEUE_FLUSH_INTERVAL_MS=${LOG_QUEUE_FLUSH_INTERVAL_MS:-200}
+      - LOG_QUEUE_CLAIM_IDLE_SECONDS=${LOG_QUEUE_CLAIM_IDLE_SECONDS:-60}
+      - LOG_QUEUE_READ_BLOCK_MS=${LOG_QUEUE_READ_BLOCK_MS:-1000}
+      - LOG_WAL_DIR=${LOG_WAL_DIR:-/app/data/usage-log-wal}
+      - LOG_WAL_MAX_BYTES=${LOG_WAL_MAX_BYTES:-21474836480}
+
       # =======================================================================
       # Admin Account (auto-created on first run)
       # =======================================================================

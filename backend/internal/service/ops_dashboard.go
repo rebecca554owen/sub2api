@@ -71,6 +71,12 @@ func (s *OpsService) GetDashboardOverview(ctx context.Context, filter *OpsDashbo
 }
 
 func (s *OpsService) resolveOpsQueryMode(ctx context.Context, requested OpsQueryMode) OpsQueryMode {
+	if s != nil && s.cfg != nil && s.cfg.UsageLogStorage.Enabled() {
+		// Ops pre-aggregation currently lives in PostgreSQL. External usage-log
+		// mode reads raw success metrics from ClickHouse and keeps error metrics
+		// in PostgreSQL, so stale pre-cutover aggregate rows must not be mixed in.
+		return OpsQueryModeRaw
+	}
 	if requested.IsValid() {
 		// Allow "auto" to be disabled via config until preagg is proven stable in production.
 		// Forced `preagg` via query param still works.

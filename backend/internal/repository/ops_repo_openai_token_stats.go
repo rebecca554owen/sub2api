@@ -23,6 +23,9 @@ func (r *opsRepository) GetOpenAITokenStats(ctx context.Context, filter *service
 	if filter.StartTime.After(filter.EndTime) {
 		return nil, fmt.Errorf("start_time must be <= end_time")
 	}
+	if r.usageStore != nil {
+		return r.getClickHouseOpenAITokenStats(ctx, filter)
+	}
 
 	dashboardFilter := &service.OpsDashboardFilter{
 		StartTime: filter.StartTime.UTC(),

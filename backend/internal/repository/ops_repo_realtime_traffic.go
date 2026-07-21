@@ -33,6 +33,9 @@ func (r *opsRepository) GetRealtimeTrafficSummary(ctx context.Context, filter *s
 	if window > time.Hour {
 		return nil, fmt.Errorf("window too large")
 	}
+	if r.usageStore != nil {
+		return r.getClickHouseRealtimeTrafficSummary(ctx, filter)
+	}
 
 	usageJoin, usageWhere, usageArgs, next := buildUsageWhere(filter, start, end, 1)
 	errorWhere, errorArgs, _ := buildErrorWhere(filter, start, end, next)

@@ -233,6 +233,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 		PageSize:  pageSize,
 		SortBy:    c.DefaultQuery("sort_by", "created_at"),
 		SortOrder: c.DefaultQuery("sort_order", "desc"),
+		Cursor:    strings.TrimSpace(c.Query("cursor")),
 	}
 
 	records, result, err := h.usageService.ListWithFilters(c.Request.Context(), params, parsed.Filters)
@@ -245,7 +246,7 @@ func (h *UsageHandler) List(c *gin.Context) {
 	for i := range records {
 		out = append(out, *dto.UsageLogFromService(&records[i]))
 	}
-	response.Paginated(c, out, result.Total, page, pageSize)
+	response.PaginatedWithCursor(c, out, result.Total, page, pageSize, result.NextCursor)
 }
 
 // ListErrors handles listing the current user's failed requests (redacted).

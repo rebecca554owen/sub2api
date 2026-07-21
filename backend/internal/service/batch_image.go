@@ -104,6 +104,14 @@ type BatchImageJob struct {
 	UserID            int64
 	APIKeyID          *int64
 	AccountID         *int64
+	GroupID           *int64
+	UserEmail         string
+	Username          string
+	APIKeyName        string
+	AccountName       string
+	AccountPlatform   string
+	GroupName         string
+	GroupPlatform     string
 	Provider          string
 	Model             string
 	TaskName          string
