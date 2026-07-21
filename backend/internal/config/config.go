@@ -89,6 +89,7 @@ type Config struct {
 	Dashboard               DashboardCacheConfig          `mapstructure:"dashboard_cache"`
 	DashboardAgg            DashboardAggregationConfig    `mapstructure:"dashboard_aggregation"`
 	UsageCleanup            UsageCleanupConfig            `mapstructure:"usage_cleanup"`
+	UsageLogStorage         UsageLogStorageConfig         `mapstructure:"usage_log_storage"`
 	Concurrency             ConcurrencyConfig             `mapstructure:"concurrency"`
 	TokenRefresh            TokenRefreshConfig            `mapstructure:"token_refresh"`
 	RunMode                 string                        `mapstructure:"run_mode" yaml:"run_mode"`
@@ -1595,6 +1596,30 @@ type UsageCleanupConfig struct {
 	TaskTimeoutSeconds int `mapstructure:"task_timeout_seconds"`
 }
 
+// UsageLogStorageConfig configures an optional external ClickHouse store for
+// usage logs. When DSN is empty, the existing PostgreSQL repository is used.
+type UsageLogStorageConfig struct {
+	DSN                   string `mapstructure:"dsn"`
+	OldLogDSN             string `mapstructure:"old_log_dsn"`
+	AutoMigrateOldLogs    bool   `mapstructure:"auto_migrate_old_logs"`
+	MigrationBatchSize    int    `mapstructure:"migration_batch_size"`
+	AllowNonEmptyTarget   bool   `mapstructure:"allow_non_empty_target"`
+	ClickHouseTTLDays     int    `mapstructure:"clickhouse_ttl_days"`
+	Stream                string `mapstructure:"stream"`
+	ConsumerGroup         string `mapstructure:"consumer_group"`
+	ConsumerName          string `mapstructure:"consumer_name"`
+	BatchSize             int    `mapstructure:"batch_size"`
+	FlushIntervalMS       int    `mapstructure:"flush_interval_ms"`
+	WALDir                string `mapstructure:"wal_dir"`
+	WALMaxBytes           int64  `mapstructure:"wal_max_bytes"`
+	ClaimIdleSeconds      int    `mapstructure:"claim_idle_seconds"`
+	ReadBlockMilliseconds int    `mapstructure:"read_block_ms"`
+}
+
+func (c UsageLogStorageConfig) Enabled() bool {
+	return strings.TrimSpace(c.DSN) != ""
+}
+
 func NormalizeRunMode(value string) string {
 	normalized := strings.ToLower(strings.TrimSpace(value))
 	switch normalized {
@@ -1640,6 +1665,27 @@ func load(allowMissingJWTSecret bool) (*Config, error) {
 	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	if err := viper.BindEnv("server.enable_server_timing", "ENABLE_SERVER_TIMING"); err != nil {
 		return nil, fmt.Errorf("bind ENABLE_SERVER_TIMING: %w", err)
+	}
+	for key, envName := range map[string]string{
+		"usage_log_storage.dsn":                    "LOG_SQL_DSN",
+		"usage_log_storage.old_log_dsn":            "OLD_LOG_SQL_DSN",
+		"usage_log_storage.auto_migrate_old_logs":  "AUTO_MIGRATE_OLD_LOGS_TO_LOG_DB",
+		"usage_log_storage.migration_batch_size":   "LOG_MIGRATION_BATCH_SIZE",
+		"usage_log_storage.allow_non_empty_target": "ALLOW_LOG_MIGRATION_TO_NON_EMPTY_TARGET",
+		"usage_log_storage.clickhouse_ttl_days":    "LOG_SQL_CLICKHOUSE_TTL_DAYS",
+		"usage_log_storage.stream":                 "LOG_QUEUE_STREAM",
+		"usage_log_storage.consumer_group":         "LOG_QUEUE_CONSUMER_GROUP",
+		"usage_log_storage.consumer_name":          "LOG_QUEUE_CONSUMER_NAME",
+		"usage_log_storage.batch_size":             "LOG_QUEUE_BATCH_SIZE",
+		"usage_log_storage.flush_interval_ms":      "LOG_QUEUE_FLUSH_INTERVAL_MS",
+		"usage_log_storage.wal_dir":                "LOG_WAL_DIR",
+		"usage_log_storage.wal_max_bytes":          "LOG_WAL_MAX_BYTES",
+		"usage_log_storage.claim_idle_seconds":     "LOG_QUEUE_CLAIM_IDLE_SECONDS",
+		"usage_log_storage.read_block_ms":          "LOG_QUEUE_READ_BLOCK_MS",
+	} {
+		if err := viper.BindEnv(key, envName); err != nil {
+			return nil, fmt.Errorf("bind %s: %w", envName, err)
+		}
 	}
 
 	// 默认值
@@ -2149,6 +2195,24 @@ func setDefaults() {
 	viper.SetDefault("usage_cleanup.batch_size", 5000)
 	viper.SetDefault("usage_cleanup.worker_interval_seconds", 10)
 	viper.SetDefault("usage_cleanup.task_timeout_seconds", 1800)
+
+	// External usage log storage. LOG_SQL_DSN is intentionally empty by
+	// default so existing PostgreSQL deployments keep their current behavior.
+	viper.SetDefault("usage_log_storage.dsn", "")
+	viper.SetDefault("usage_log_storage.old_log_dsn", "")
+	viper.SetDefault("usage_log_storage.auto_migrate_old_logs", false)
+	viper.SetDefault("usage_log_storage.migration_batch_size", 10000)
+	viper.SetDefault("usage_log_storage.allow_non_empty_target", false)
+	viper.SetDefault("usage_log_storage.clickhouse_ttl_days", 90)
+	viper.SetDefault("usage_log_storage.stream", "sub2api:usage_logs")
+	viper.SetDefault("usage_log_storage.consumer_group", "sub2api-usage-log-writers")
+	viper.SetDefault("usage_log_storage.consumer_name", "")
+	viper.SetDefault("usage_log_storage.batch_size", 1000)
+	viper.SetDefault("usage_log_storage.flush_interval_ms", 200)
+	viper.SetDefault("usage_log_storage.wal_dir", "/app/data/usage-log-wal")
+	viper.SetDefault("usage_log_storage.wal_max_bytes", int64(20*1024*1024*1024))
+	viper.SetDefault("usage_log_storage.claim_idle_seconds", 60)
+	viper.SetDefault("usage_log_storage.read_block_ms", 1000)
 
 	// Idempotency
 	viper.SetDefault("idempotency.observe_only", true)
@@ -2974,6 +3038,38 @@ func (c *Config) Validate() error {
 		}
 		if c.UsageCleanup.TaskTimeoutSeconds < 0 {
 			return fmt.Errorf("usage_cleanup.task_timeout_seconds must be non-negative")
+		}
+	}
+	if c.UsageLogStorage.Enabled() {
+		if c.UsageLogStorage.MigrationBatchSize <= 0 || c.UsageLogStorage.MigrationBatchSize > 10000 {
+			return fmt.Errorf("usage_log_storage.migration_batch_size must be between 1 and 10000")
+		}
+		if c.UsageLogStorage.ClickHouseTTLDays <= 0 || c.UsageLogStorage.ClickHouseTTLDays > 3650 {
+			return fmt.Errorf("usage_log_storage.clickhouse_ttl_days must be between 1 and 3650")
+		}
+		if strings.TrimSpace(c.UsageLogStorage.Stream) == "" {
+			return fmt.Errorf("usage_log_storage.stream must not be empty")
+		}
+		if strings.TrimSpace(c.UsageLogStorage.ConsumerGroup) == "" {
+			return fmt.Errorf("usage_log_storage.consumer_group must not be empty")
+		}
+		if c.UsageLogStorage.BatchSize <= 0 || c.UsageLogStorage.BatchSize > 10000 {
+			return fmt.Errorf("usage_log_storage.batch_size must be between 1 and 10000")
+		}
+		if c.UsageLogStorage.FlushIntervalMS <= 0 {
+			return fmt.Errorf("usage_log_storage.flush_interval_ms must be positive")
+		}
+		if strings.TrimSpace(c.UsageLogStorage.WALDir) == "" {
+			return fmt.Errorf("usage_log_storage.wal_dir must not be empty")
+		}
+		if c.UsageLogStorage.WALMaxBytes <= 0 {
+			return fmt.Errorf("usage_log_storage.wal_max_bytes must be positive")
+		}
+		if c.UsageLogStorage.ClaimIdleSeconds <= 0 {
+			return fmt.Errorf("usage_log_storage.claim_idle_seconds must be positive")
+		}
+		if c.UsageLogStorage.ReadBlockMilliseconds <= 0 {
+			return fmt.Errorf("usage_log_storage.read_block_ms must be positive")
 		}
 	}
 	if c.Idempotency.DefaultTTLSeconds <= 0 {

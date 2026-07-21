@@ -840,6 +840,35 @@ usage_cleanup:
   task_timeout_seconds: 1800
 
 # =============================================================================
+# Optional ClickHouse Usage Log Storage
+# 可选 ClickHouse 用量日志存储
+# =============================================================================
+# Leave dsn empty to keep the existing PostgreSQL behavior. When enabled,
+# detailed usage logs are durably queued through Redis Streams, with a local
+# WAL as the Redis outage fallback, and stored only in ClickHouse.
+# dsn 留空时继续使用 PostgreSQL。启用后，明细日志经 Redis Streams 持久队列写入
+# ClickHouse；Redis 故障时使用本地 WAL 兜底，不进行 PostgreSQL/ClickHouse 双写。
+usage_log_storage:
+  dsn: ""
+  # Empty uses the main PostgreSQL database as the legacy usage_logs source.
+  old_log_dsn: ""
+  auto_migrate_old_logs: false
+  migration_batch_size: 10000
+  allow_non_empty_target: false
+  clickhouse_ttl_days: 90
+  stream: "sub2api:usage_logs"
+  consumer_group: "sub2api-usage-log-writers"
+  # Empty generates a unique hostname/PID consumer name for each replica.
+  # 留空时为每个实例自动生成 hostname/PID consumer 名称。
+  consumer_name: ""
+  batch_size: 1000
+  flush_interval_ms: 200
+  claim_idle_seconds: 60
+  read_block_ms: 1000
+  wal_dir: "/app/data/usage-log-wal"
+  wal_max_bytes: 21474836480
+
+# =============================================================================
 # HTTP 写接口幂等配置
 # Idempotency Configuration
 # =============================================================================

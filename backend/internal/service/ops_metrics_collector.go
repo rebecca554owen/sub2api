@@ -43,6 +43,10 @@ type opsSchedulableAccountLoadRepository interface {
 	ListSchedulableAccountLoads(ctx context.Context) ([]AccountWithConcurrency, error)
 }
 
+type opsUsageMetricsWindowReader interface {
+	GetUsageMetricsWindow(ctx context.Context, start, end time.Time) (int64, int64, OpsPercentiles, OpsPercentiles, error)
+}
+
 type OpsMetricsCollector struct {
 	opsRepo     OpsRepository
 	settingRepo SettingRepository
@@ -274,14 +278,26 @@ func (c *OpsMetricsCollector) collectAndPersist(ctx context.Context) error {
 	active, idle := c.dbPoolStats()
 	redisTotal, redisIdle, redisStatsOK := c.redisPoolStats()
 
-	successCount, tokenConsumed, err := c.queryUsageCounts(ctx, windowStart, windowEnd)
-	if err != nil {
-		return fmt.Errorf("query usage counts: %w", err)
-	}
+	var successCount, tokenConsumed int64
+	var duration, ttft opsCollectedPercentiles
+	if reader, ok := c.opsRepo.(opsUsageMetricsWindowReader); ok {
+		var durationStats, ttftStats OpsPercentiles
+		successCount, tokenConsumed, durationStats, ttftStats, err = reader.GetUsageMetricsWindow(ctx, windowStart, windowEnd)
+		if err != nil {
+			return fmt.Errorf("query usage metrics: %w", err)
+		}
+		duration = opsCollectedPercentilesFromOps(durationStats)
+		ttft = opsCollectedPercentilesFromOps(ttftStats)
+	} else {
+		successCount, tokenConsumed, err = c.queryUsageCounts(ctx, windowStart, windowEnd)
+		if err != nil {
+			return fmt.Errorf("query usage counts: %w", err)
+		}
 
-	duration, ttft, err := c.queryUsageLatency(ctx, windowStart, windowEnd)
-	if err != nil {
-		return fmt.Errorf("query usage latency: %w", err)
+		duration, ttft, err = c.queryUsageLatency(ctx, windowStart, windowEnd)
+		if err != nil {
+			return fmt.Errorf("query usage latency: %w", err)
+		}
 	}
 
 	errorTotal, businessLimited, errorSLA, upstreamExcl, upstream429, upstream529, err := c.queryErrorCounts(ctx, windowStart, windowEnd)
@@ -441,6 +457,15 @@ type opsCollectedPercentiles struct {
 	p99 *int
 	avg *float64
 	max *int
+}
+
+func opsCollectedPercentilesFromOps(value OpsPercentiles) opsCollectedPercentiles {
+	result := opsCollectedPercentiles{p50: value.P50, p90: value.P90, p95: value.P95, p99: value.P99, max: value.Max}
+	if value.Avg != nil {
+		average := float64(*value.Avg)
+		result.avg = &average
+	}
+	return result
 }
 
 func (c *OpsMetricsCollector) queryUsageCounts(ctx context.Context, start, end time.Time) (successCount int64, tokenConsumed int64, err error) {

@@ -678,14 +678,24 @@ func (r *opsRepository) queryRawPartial(ctx context.Context, filter *service.Ops
 
 func (r *opsRepository) rawOpsDataExists(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (bool, error) {
 	{
-		join, where, args, _ := buildUsageWhere(filter, start, end, 1)
-		q := `SELECT EXISTS(SELECT 1 FROM usage_logs ul ` + join + ` ` + where + ` LIMIT 1)`
-		var exists bool
-		if err := r.db.QueryRowContext(ctx, q, args...).Scan(&exists); err != nil {
-			return false, err
-		}
-		if exists {
-			return true, nil
+		if r != nil && r.usageStore != nil {
+			exists, err := r.clickHouseRawUsageExists(ctx, filter, start, end)
+			if err != nil {
+				return false, err
+			}
+			if exists {
+				return true, nil
+			}
+		} else {
+			join, where, args, _ := buildUsageWhere(filter, start, end, 1)
+			q := `SELECT EXISTS(SELECT 1 FROM usage_logs ul ` + join + ` ` + where + ` LIMIT 1)`
+			var exists bool
+			if err := r.db.QueryRowContext(ctx, q, args...).Scan(&exists); err != nil {
+				return false, err
+			}
+			if exists {
+				return true, nil
+			}
 		}
 	}
 
@@ -789,6 +799,9 @@ func maxTime(a, b time.Time) time.Time {
 }
 
 func (r *opsRepository) queryUsageCounts(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (successCount int64, tokenConsumed int64, err error) {
+	if r != nil && r.usageStore != nil {
+		return r.queryClickHouseUsageCounts(ctx, filter, start, end)
+	}
 	join, where, args, _ := buildUsageWhere(filter, start, end, 1)
 
 	q := `
@@ -809,7 +822,23 @@ FROM usage_logs ul
 	return successCount, tokenConsumed, nil
 }
 
+func (r *opsRepository) GetUsageMetricsWindow(ctx context.Context, start, end time.Time) (int64, int64, service.OpsPercentiles, service.OpsPercentiles, error) {
+	filter := &service.OpsDashboardFilter{StartTime: start, EndTime: end, QueryMode: service.OpsQueryModeRaw}
+	requests, tokens, err := r.queryUsageCounts(ctx, filter, start, end)
+	if err != nil {
+		return 0, 0, service.OpsPercentiles{}, service.OpsPercentiles{}, err
+	}
+	duration, ttft, _, err := r.queryUsageLatency(ctx, filter, start, end)
+	if err != nil {
+		return 0, 0, service.OpsPercentiles{}, service.OpsPercentiles{}, err
+	}
+	return requests, tokens, duration, ttft, nil
+}
+
 func (r *opsRepository) queryUsageLatency(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (duration service.OpsPercentiles, ttft service.OpsPercentiles, ttftSampleCount int64, err error) {
+	if r != nil && r.usageStore != nil {
+		return r.queryClickHouseUsageLatency(ctx, filter, start, end)
+	}
 	join, where, args, _ := buildUsageWhere(filter, start, end, 1)
 	q := `
 SELECT
@@ -920,6 +949,9 @@ func (r *opsRepository) queryCurrentRates(ctx context.Context, filter *service.O
 }
 
 func (r *opsRepository) queryPeakRates(ctx context.Context, filter *service.OpsDashboardFilter, start, end time.Time) (qpsPeak float64, tpsPeak float64, err error) {
+	if r != nil && r.usageStore != nil {
+		return r.queryClickHousePeakRates(ctx, filter, start, end)
+	}
 	usageJoin, usageWhere, usageArgs, next := buildUsageWhere(filter, start, end, 1)
 	errorWhere, errorArgs, _ := buildErrorWhere(filter, start, end, next)
 
