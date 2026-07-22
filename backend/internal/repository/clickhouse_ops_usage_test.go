@@ -19,7 +19,7 @@ func TestOpsUsageCountsUseClickHouseSnapshots(t *testing.T) {
 	groupID := int64(7)
 	start := time.Date(2026, 7, 21, 1, 0, 0, 0, time.UTC)
 	end := start.Add(time.Hour)
-	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(), sum(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens) FROM usage_logs FINAL WHERE created_at >= ? AND created_at < ? AND group_id = ? AND if(empty(group_platform), account_platform, group_platform) = ?")).
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT count(), sum(usage_logs.input_tokens + usage_logs.output_tokens + usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens) FROM usage_logs FINAL WHERE created_at >= ? AND created_at < ? AND group_id = ? AND if(empty(group_platform), account_platform, group_platform) = ?")).
 		WithArgs(start, end, groupID, "openai").
 		WillReturnRows(sqlmock.NewRows([]string{"requests", "tokens"}).AddRow(3, 120))
 	repo := &opsRepository{usageStore: &clickHouseUsageLogStore{db: db}}

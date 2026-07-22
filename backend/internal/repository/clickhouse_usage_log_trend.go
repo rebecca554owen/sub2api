@@ -129,9 +129,10 @@ func (r *clickHouseUsageLogRepository) GetUserBreakdownStats(ctx context.Context
 	where, args := clickHouseUsageFilters(filters)
 	if strings.TrimSpace(dim.Endpoint) != "" {
 		column := "inbound_endpoint"
-		if dim.EndpointType == "upstream" {
+		switch dim.EndpointType {
+		case "upstream":
 			column = "upstream_endpoint"
-		} else if dim.EndpointType == "path" {
+		case "path":
 			column = "concat(ifNull(inbound_endpoint, ''), ' -> ', ifNull(upstream_endpoint, ''))"
 		}
 		where += " AND " + column + " = ?"
@@ -140,11 +141,7 @@ func (r *clickHouseUsageLogRepository) GetUserBreakdownStats(ctx context.Context
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	order := "actual_cost"
-	switch dim.SortBy {
-	case "requests", "total_tokens", "cost", "account_cost":
-		order = dim.SortBy
-	}
+	order := clickHouseUserBreakdownOrder(dim.SortBy)
 	query := fmt.Sprintf(`SELECT user_id, any(user_email), count() AS requests,
     sum(input_tokens) AS input_tokens, sum(output_tokens) AS output_tokens,
     sum(cache_creation_tokens + cache_read_tokens) AS cache_tokens,
@@ -155,7 +152,7 @@ FROM usage_logs FINAL WHERE %s GROUP BY user_id ORDER BY %s DESC LIMIT ?`,
 	args = append(args, limit)
 	rows, err := r.store.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query clickhouse user breakdown: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 	result := make([]usagestats.UserBreakdownItem, 0)
@@ -164,11 +161,37 @@ FROM usage_logs FINAL WHERE %s GROUP BY user_id ORDER BY %s DESC LIMIT ?`,
 		if err := rows.Scan(&item.UserID, &item.Email, &item.Requests, &item.InputTokens,
 			&item.OutputTokens, &item.CacheTokens, &item.TotalTokens, &item.Cost,
 			&item.ActualCost, &item.AccountCost); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("scan clickhouse user breakdown: %w", err)
 		}
 		result = append(result, item)
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate clickhouse user breakdown: %w", err)
+	}
+	return result, nil
+}
+
+func clickHouseUserBreakdownOrder(sortBy string) string {
+	switch sortBy {
+	case "requests":
+		return "count()"
+	case "input_tokens":
+		return "sum(usage_logs.input_tokens)"
+	case "output_tokens":
+		return "sum(usage_logs.output_tokens)"
+	case "cache_tokens":
+		return "sum(usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens)"
+	case "total_tokens":
+		return "sum(" + clickHouseTokenExpression + ")"
+	case "cost":
+		return "sum(usage_logs.total_cost)"
+	case "account_cost":
+		return "sum(" + clickHouseAccountCostExpression + ")"
+	case "actual_cost":
+		fallthrough
+	default:
+		return "sum(usage_logs.actual_cost)"
+	}
 }
 
 func (r *clickHouseUsageLogRepository) GetAllGroupUsageSummary(ctx context.Context, todayStart time.Time) ([]usagestats.GroupUsageSummary, error) {

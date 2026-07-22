@@ -99,3 +99,38 @@ func TestMigrationFloatEqualUsesRelativeTolerance(t *testing.T) {
 	require.True(t, migrationFloatEqual(1_000_000, 1_000_000.0005))
 	require.False(t, migrationFloatEqual(1_000_000, 1_000_000.01))
 }
+
+func TestClickHouseAggregateExpressionsQualifyUsageLogColumns(t *testing.T) {
+	t.Parallel()
+	require.Equal(t,
+		"usage_logs.input_tokens + usage_logs.output_tokens + usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens",
+		clickHouseTokenExpression,
+	)
+	require.Equal(t,
+		"ifNull(usage_logs.account_stats_cost, usage_logs.total_cost) * ifNull(usage_logs.account_rate_multiplier, 1)",
+		clickHouseAccountCostExpression,
+	)
+}
+
+func TestClickHouseUserBreakdownOrder(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"requests":      "count()",
+		"input_tokens":  "sum(usage_logs.input_tokens)",
+		"output_tokens": "sum(usage_logs.output_tokens)",
+		"cache_tokens":  "sum(usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens)",
+		"total_tokens":  "sum(usage_logs.input_tokens + usage_logs.output_tokens + usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens)",
+		"cost":          "sum(usage_logs.total_cost)",
+		"actual_cost":   "sum(usage_logs.actual_cost)",
+		"account_cost":  "sum(ifNull(usage_logs.account_stats_cost, usage_logs.total_cost) * ifNull(usage_logs.account_rate_multiplier, 1))",
+		"":              "sum(usage_logs.actual_cost)",
+		"invalid":       "sum(usage_logs.actual_cost)",
+	}
+	for sortBy, want := range tests {
+		sortBy, want := sortBy, want
+		t.Run(sortBy, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, want, clickHouseUserBreakdownOrder(sortBy))
+		})
+	}
+}

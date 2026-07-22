@@ -231,6 +231,12 @@ func (r *UsageLogRuntime) Health(ctx context.Context) UsageLogHealth {
 	return health
 }
 
+// UsageLogHealth exposes runtime health through the handler-facing interface
+// without coupling the handler package to repository implementation types.
+func (r *UsageLogRuntime) UsageLogHealth(ctx context.Context) any {
+	return r.Health(ctx)
+}
+
 func ProvideUsageLogRepositoryBundle(
 	client *dbent.Client,
 	sqlDB *sql.DB,
