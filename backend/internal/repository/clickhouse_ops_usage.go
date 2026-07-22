@@ -211,25 +211,6 @@ func (r *opsRepository) getClickHouseLatencyHistogram(ctx context.Context, filte
 	}, nil
 }
 
-func percentileFromSorted(values []int64, percentile float64) *int {
-	if len(values) == 0 {
-		return nil
-	}
-	index := int(math.Round(percentile * float64(len(values)-1)))
-	index = max(0, min(index, len(values)-1))
-	value := int(values[index])
-	return &value
-}
-
-func sortedInt64Keys(values map[int64]opsUsageBucket) []int64 {
-	keys := make([]int64, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
-	return keys
-}
-
 func (r *opsRepository) getClickHouseRealtimeTrafficSummary(ctx context.Context, filter *service.OpsDashboardFilter) (*service.OpsRealtimeTrafficSummary, error) {
 	start := filter.StartTime.UTC()
 	end := filter.EndTime.UTC()

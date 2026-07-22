@@ -104,7 +104,6 @@ func (r *clickHouseUsageLogRepository) GetAPIKeyDashboardStats(ctx context.Conte
 
 func (r *clickHouseUsageLogRepository) fillUserDashboardUsage(ctx context.Context, stats *usagestats.UserDashboardStats, where string, args ...any) error {
 	today := timezone.Today().UTC()
-	queryArgs := append(append([]any{}, args...), today, today, today, today, today, today, today)
 	query := fmt.Sprintf(`SELECT count(), sum(input_tokens), sum(output_tokens), sum(cache_creation_tokens),
     sum(cache_read_tokens), sum(total_cost), sum(actual_cost), if(count() = 0, 0, avg(ifNull(duration_ms, 0))),
     countIf(created_at >= ?), sumIf(input_tokens, created_at >= ?), sumIf(output_tokens, created_at >= ?),
@@ -113,7 +112,7 @@ func (r *clickHouseUsageLogRepository) fillUserDashboardUsage(ctx context.Contex
 FROM usage_logs FINAL WHERE %s`, where)
 	// ClickHouse placeholders are positional in textual order, so the today
 	// values precede WHERE arguments even though WHERE is logically evaluated first.
-	queryArgs = append([]any{today, today, today, today, today, today, today}, args...)
+	queryArgs := append([]any{today, today, today, today, today, today, today}, args...)
 	if err := r.store.db.QueryRowContext(ctx, query, queryArgs...).Scan(
 		&stats.TotalRequests, &stats.TotalInputTokens, &stats.TotalOutputTokens,
 		&stats.TotalCacheCreationTokens, &stats.TotalCacheReadTokens,

@@ -11,8 +11,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/service"
 )
 
-const clickHouseAccountCostExpression = "ifNull(account_stats_cost, total_cost) * ifNull(account_rate_multiplier, 1)"
-const clickHouseTokenExpression = "input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens"
+const clickHouseAccountCostExpression = "ifNull(usage_logs.account_stats_cost, usage_logs.total_cost) * ifNull(usage_logs.account_rate_multiplier, 1)"
+const clickHouseTokenExpression = "usage_logs.input_tokens + usage_logs.output_tokens + usage_logs.cache_creation_tokens + usage_logs.cache_read_tokens"
 
 func (r *clickHouseUsageLogRepository) aggregateUsageStats(ctx context.Context, where string, args ...any) (*usagestats.UsageStats, error) {
 	if strings.TrimSpace(where) == "" {

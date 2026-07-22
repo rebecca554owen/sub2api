@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -8,7 +9,6 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
-	"github.com/Wei-Shaw/sub2api/internal/repository"
 	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
@@ -16,7 +16,11 @@ import (
 
 type OpsHandler struct {
 	opsService      *service.OpsService
-	usageLogRuntime *repository.UsageLogRuntime
+	usageLogRuntime usageLogHealthProvider
+}
+
+type usageLogHealthProvider interface {
+	UsageLogHealth(context.Context) any
 }
 
 // GetErrorLogByID returns ops error log detail.
@@ -74,7 +78,7 @@ func NewOpsHandler(opsService *service.OpsService) *OpsHandler {
 	return &OpsHandler{opsService: opsService}
 }
 
-func ProvideOpsHandler(opsService *service.OpsService, usageLogRuntime *repository.UsageLogRuntime) *OpsHandler {
+func ProvideOpsHandler(opsService *service.OpsService, usageLogRuntime usageLogHealthProvider) *OpsHandler {
 	return &OpsHandler{opsService: opsService, usageLogRuntime: usageLogRuntime}
 }
 
@@ -82,10 +86,12 @@ func ProvideOpsHandler(opsService *service.OpsService, usageLogRuntime *reposito
 // and writer counters for the optional external usage-log pipeline.
 func (h *OpsHandler) GetUsageLogHealth(c *gin.Context) {
 	if h == nil || h.usageLogRuntime == nil {
-		response.Success(c, repository.UsageLogHealth{Enabled: false})
+		response.Success(c, struct {
+			Enabled bool `json:"enabled"`
+		}{Enabled: false})
 		return
 	}
-	response.Success(c, h.usageLogRuntime.Health(c.Request.Context()))
+	response.Success(c, h.usageLogRuntime.UsageLogHealth(c.Request.Context()))
 }
 
 // GetErrorLogs lists ops error logs.
