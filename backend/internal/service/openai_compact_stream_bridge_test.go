@@ -524,3 +524,90 @@ func TestHandleNonStreamingResponsePassthrough_CompactClientStreamBridgesToSSE(t
 	require.NotNil(t, result.usage)
 	require.Equal(t, 7, result.usage.InputTokens)
 }
+
+// TestHandleSSEToJSON_ReasoningOnlyOutputTriggersReconstruction verifies that
+// when the terminal completed response carries only a reasoning item (e.g.
+// gpt-5.6-sol behaviour), the SSE-to-JSON path still reconstructs the visible
+// message output from accumulated delta events instead of returning an empty
+// response with only encrypted reasoning.
+func TestHandleSSEToJSON_ReasoningOnlyOutputTriggersReconstruction(t *testing.T) {
+	svc := newCompactBridgeTestService()
+	c, rec := newCompactBridgeTestContext(t, false)
+
+	upstreamSSE := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Hello from delta!","item_id":"msg_abc","output_index":0,"content_index":0}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"resp_reasoning_only","object":"response","model":"gpt-5.6-sol","status":"completed","output":[{"type":"reasoning","content":[],"encrypted_content":"opaque-blob","summary":[]}],"usage":{"input_tokens":10,"output_tokens":15,"total_tokens":25}}}`,
+		``,
+	}, "\n")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}
+
+	result, err := svc.handleNonStreamingResponse(context.Background(), resp, c, &Account{ID: 1, Type: AccountTypeOAuth}, "gpt-5.6-sol", "gpt-5.6-sol")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// Body must be JSON (not SSE events), with message content reconstructed from deltas.
+	body := rec.Body.String()
+	require.NotContains(t, body, "event:")
+	require.NotContains(t, body, "data:")
+
+	// The reconstructed output must include the message content from the delta.
+	require.NotEmpty(t, gjson.Get(body, "output").Array(), "output should have been reconstructed from deltas")
+
+	var hasMessage bool
+	for _, item := range gjson.Get(body, "output").Array() {
+		if item.Get("type").String() == "message" {
+			hasMessage = true
+			require.NotEmpty(t, item.Get("content").Array(), "message content must not be empty")
+		}
+	}
+	require.True(t, hasMessage, "reconstructed output must contain a message item")
+	require.Equal(t, int64(25), gjson.Get(body, "usage.total_tokens").Int())
+}
+
+// TestHandlePassthroughSSEToJSON_ReasoningOnlyOutputTriggersReconstruction is
+// the passthrough-path equivalent of the same scenario.
+func TestHandlePassthroughSSEToJSON_ReasoningOnlyOutputTriggersReconstruction(t *testing.T) {
+	svc := newCompactBridgeTestService()
+	c, rec := newCompactBridgeTestContext(t, false)
+
+	upstreamSSE := strings.Join([]string{
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"Passthrough text","item_id":"msg_pt_abc","output_index":0,"content_index":0}`,
+		``,
+		`data: {"type":"response.completed","response":{"id":"resp_pt_reasoning","object":"response","status":"completed","output":[{"type":"reasoning","content":[],"encrypted_content":"opaque-blob-pt"}],"usage":{"input_tokens":8,"output_tokens":12,"total_tokens":20}}}`,
+		``,
+	}, "\n")
+
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstreamSSE)),
+	}
+
+	result, err := svc.handleNonStreamingResponsePassthrough(context.Background(), resp, c, "gpt-5.6-sol", "")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	body := rec.Body.String()
+	require.NotContains(t, body, "event:")
+	require.NotContains(t, body, "data:")
+
+	require.NotEmpty(t, gjson.Get(body, "output").Array())
+
+	var hasMessage bool
+	for _, item := range gjson.Get(body, "output").Array() {
+		if item.Get("type").String() == "message" {
+			hasMessage = true
+			require.NotEmpty(t, item.Get("content").Array())
+		}
+	}
+	require.True(t, hasMessage)
+	require.Equal(t, int64(20), gjson.Get(body, "usage.total_tokens").Int())
+}

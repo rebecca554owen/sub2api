@@ -1213,10 +1213,12 @@ func (s *OpenAIGatewayService) handleSSEToJSON(resp *http.Response, c *gin.Conte
 		if parsedUsage, parsed := extractOpenAIUsageFromJSONBytes(finalResponse); parsed {
 			*usage = parsedUsage
 		}
-		// When the terminal event has an empty output array, reconstruct
-		// output from accumulated delta events so the client gets full content.
-		// gjson Array() returns empty slice for null, missing, or empty arrays.
-		if len(gjson.GetBytes(finalResponse, "output").Array()) == 0 {
+		// When the terminal event lacks visible output (message, function_call,
+		// or image_generation_call), reconstruct output from accumulated delta
+		// events. A non-empty output array that only contains reasoning items
+		// (e.g. gpt-5.6-sol completed→{type:"reasoning", content:[]}) still
+		// needs reconstruction because the deltas carry the real message text.
+		if !hasVisibleResponseOutput(finalResponse) {
 			if outputJSON, reconstructed := reconstructResponseOutputFromSSE(bodyText); reconstructed {
 				if patched, err := sjson.SetRawBytes(finalResponse, "output", outputJSON); err == nil {
 					finalResponse = patched
@@ -1733,4 +1735,23 @@ func (s *OpenAIGatewayService) replaceModelInSSEBody(body, fromModel, toModel st
 		lines[i] = s.replaceModelInSSELine(line, fromModel, toModel)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// hasVisibleResponseOutput checks whether the response output array contains
+// at least one item that produces visible content for the client (message,
+// function_call, or image_generation_call). Reasoning items alone
+// (encrypted_content not readable by the client) are not considered visible.
+func hasVisibleResponseOutput(response []byte) bool {
+	for _, item := range gjson.GetBytes(response, "output").Array() {
+		switch strings.TrimSpace(item.Get("type").String()) {
+		case "message":
+			// A message item must have at least one content part to be visible.
+			if len(item.Get("content").Array()) > 0 {
+				return true
+			}
+		case "function_call", "image_generation_call":
+			return true
+		}
+	}
+	return false
 }

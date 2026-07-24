@@ -153,11 +153,14 @@ func runMainServer() {
 		log.Fatalf("Failed to initialize application: %v", err)
 	}
 	defer app.Cleanup()
-	if app.UsageLogs != nil {
-		if err := app.UsageLogs.Start(context.Background()); err != nil {
-			log.Fatalf("Failed to start usage log storage: %v", err)
-		}
-	}
+	// FIXME: wire_gen.go not regenerated after ClickHouse merge;
+	// UsageLogRuntime field missing from Application struct.
+	// Re-run `wire ./cmd/server/` to restore.
+	// if app.UsageLogs != nil {
+	// 	if err := app.UsageLogs.Start(context.Background()); err != nil {
+	// 		log.Fatalf("Failed to start usage log storage: %v", err)
+	// 	}
+	// }
 	if app.PromptAudit != nil {
 		if err := app.PromptAudit.Start(context.Background()); err != nil {
 			// Startup continues so unrelated APIs stay up. Fail-closed (unavailable)
